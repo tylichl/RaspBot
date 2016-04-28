@@ -115,23 +115,24 @@ int main(void)
 {
 	char buffer[6];
 	int addr;
-	printf("I2C ");
 	wiringPiSetup();
 	peripheralSetup(0x70);
-	/*buffer[0] = 0x70; 
-	buffer[1] = 0x00;
+	printf("I2C %d\n\n", node->fd);
+	buffer[0] = 0x00;
+	buffer[1] = 0x0F;
 	buffer[2] = 0x01;	// L
-	buffer[3] = 0x00;
-	buffer[4] = 0x01;	// P
-	buffer[5] = 0x00;*/
-
-	printf("%d\n", wiringPiI2CWrite (node->fd, 0x00));
-	printf("%d\n", wiringPiI2CWrite (node->fd, 0xFF));
-	printf("%d\n", wiringPiI2CWrite (node->fd, 0xFF));
-	printf("%d\n", wiringPiI2CWrite (node->fd, 0xFF));
-	/*printf("%d\n", wiringPiI2CWrite (node->fd, 0x7F));
-	printf("%d\n", wiringPiI2CWrite (node->fd, 0xFF));*/
-
+	buffer[3] = 0x0F;
+	buffer[4] = 0x01;
+	write(node->fd, buffer, 5);
+/*
+	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));
+	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));
+	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));
+	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));
+	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));
+	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));*/
+	//while(1)
+	   // wiringPiI2CWrite(node->fd, 0x00);
 	//printf("Write address (hexadecimal) of the I2C device: \t0x");
 	//scanf("%x", &addr);
 	//mcp3422Setup(400, addr, MCP3422_BITS_12, MCP3422_GAIN_1);

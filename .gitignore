@@ -9,3 +9,5 @@
 /src/KM2/km2.elf
 /src/KM2/km2.map
 /src/KM2/km2.lst
+/src/tests/motor
+/src/tests/udp_i2c
