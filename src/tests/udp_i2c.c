@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 Frantisek Burian <BuFran@seznam.cz>
+ * Copyright (c) 2016 Ladislav Tylich <tylichl@gmail.com>
  ***********************************************************************
  * This file is part of RaspBot:
  *	https://projects.drogon.net/raspberry-pi/wiringpi/
@@ -28,114 +28,196 @@
 #include <unistd.h>
 #include <wiringPi.h>
 #include <wiringPiI2C.h>
-//#include <mcp3422.h>
+#include <mcp3422.h>
 #include "../RaspBot.h"
+
+#define LOCK_KEY 0
+#define DESTPORT 23
+#define SRCPORT 23
+#define MCP3422 0x68
+
+extern int myAnalogRead (struct wiringPiNodeStruct *node, int chan);		// mcp3422/24
 
 /*temporary*/
 volatile enum estate {
-    S_write = 0,
-    S_read = 1,
-    S_iddle = 2,
-    S_exit = 0xFF,
+	S_i2c_write = 0x08,
+	S_udp_write = 0x10,
+	S_iddle = 0x17,
+    	S_exit = 0xFF,
 } state = S_iddle;
 
 volatile int L = 0;
 volatile int R = 0;
-volatile char actaddr;
+int addrOK = 0;
+char i2cAddr = 0x00;		// General call default
+char km2buf[5];
+int received = 0;
+
 struct wiringPiNodeStruct *node ;
+struct sockaddr_in client;
 
 
 
 
 PI_THREAD(udp)
 {
-   struct sockaddr_in srv, cli;
+	struct sockaddr_in srv, cli;
+	int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	memset(&srv, 0, sizeof(srv));
+	srv.sin_family = AF_INET;
+	srv.sin_addr.s_addr = htonl(INADDR_ANY);	// long from host byte order to network byte order
+	srv.sin_port = htons(SRCPORT);	// unsigned short from host byte order to network byte order
+	bind(fd, (struct sockaddr*)&srv, sizeof(srv));	// bind a name to a socket, bind(sockfd, addr, addrlen);
+	// client settigs
+	//cli.sin_family = AF_INET;
+	//cli.sin_addr.s_addr = htonl(INADDR_ANY);
+	//cli.sin_port = htons(DESTPORT);
+	while (state != S_exit) {
+		fd_set rfds;		// declare struct fd_set
+ 		FD_ZERO(&rfds);		// clears the set
+		FD_SET(fd,&rfds);	// add file descriptor to set rfds
+		int addok;
 
+		struct timeval tv;
+		tv.tv_sec = 1;
+        	tv.tv_usec = 0;
+		if (select(fd+1, &rfds, NULL,NULL, & tv) < 0)
+	    		continue;
+		if (FD_ISSET(fd, &rfds)) { 		// test if file descriptor is part of the set
 
-   int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-   memset(&srv, 0, sizeof(srv));
-   srv.sin_family = AF_INET;
-   srv.sin_addr.s_addr = htonl(INADDR_ANY);	// long from host byte order to network byte order
-   srv.sin_port = htons(32000);	// unsigned short from host byte order to network byte order
-   bind(fd, (struct sockaddr*)&srv, sizeof(srv));	// bind a name to a socket, bind(sockfd, addr, addrlen);
+			char buf[1024];
+			socklen_t alen = sizeof(cli);
+			int by = 0;
+			piLock(LOCK_KEY);
+			by = recvfrom(fd, km2buf, sizeof(km2buf), 0, (struct sockaddr*)&cli, &alen);
+			piUnlock(LOCK_KEY);
+			client = cli;
+	    		if (addrOK) {
+				switch(by)
+				{
+				case 1:
+                                        //piLock(LOCK_KEY);
+                                        addok = peripheralSetup(km2buf[0]);
+                                        //piUnlock(LOCK_KEY);
+                                        i2cAddr = km2buf[0];
+                                        if(addok < 0) {
+                                                addrOK = 0;
+                                                perror("Can't send through i2c");
+                                        }
+                                        else {
+                                                addrOK = 1;
+					}
+					break;
+				case 4:
+					received = 4;
+					state = S_i2c_write;
+					break;
+				case 5:
+					L = (short)((km2buf[2] << 8) | km2buf[1]);
+					R = (short)((km2buf[4] << 8) | km2buf[3]);
+					printf("\rL=%04i R=%04i >\n",L,R);
+					received = 5;
+					state = S_i2c_write;
+					break;
+				}
+				//state = S_i2c_write;
+			}
+			else {
+				state = S_iddle;
+				if(by == 1) {		// address was sent
+					int addok;
+					piLock(LOCK_KEY);
+					addok = peripheralSetup(km2buf[0]);
+					piUnlock(LOCK_KEY);
+					i2cAddr = km2buf[0];
+					if(addok < 0) {
+						addrOK = 0;
+						perror("Can't send through i2c");
+					}
+					else {
+						addrOK = 1;
+					}
+				}
+			}
+		}
 
-    while (state != S_exit) {
-	fd_set rfds;		// declare struct fd_set
-	FD_ZERO(&rfds);		// clears the set
-	FD_SET(fd,&rfds);	// add file descriptor to set rfds
+		if(state == S_udp_write) {
 
-	struct timeval tv;
-	tv.tv_sec = 1;
-        tv.tv_usec = 0;
-
-	if (select(fd+1, &rfds, NULL,NULL, & tv) < 0)
-	    continue;
-
-	if (FD_ISSET(fd, &rfds)) 		// test if file descriptor is part of the set
-	{
-	    char buf[1024];
-	    socklen_t alen = sizeof(cli);
-	    int by = recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr*)&cli, &alen);
-	
-	    if (by == 6)
-	    {
-		
-		actaddr = buf[0] & 0xFE;	// actual address + W/R flag
-		state = buf[0] & 0x01;
-
-		L = (short)((buf[3] << 8) | buf[2]);
-		R = (short)((buf[5] << 8) | buf[4]);
-		
-	    printf("\rL=%04i R=%04i     >",L,R);
-	    }
+			char buf[4];
+			buf[0] = (short)(L & 0x00FF);
+			buf[1] = (short)((L & 0xFF00)  >> 8);
+			buf[2] = (short)(R & 0x00FF);
+			buf[3] = (short)((R & 0xFF00)  >> 8);
+			int bufsize = 4;
+	                if(sendto(fd, buf, bufsize, 0, (struct sockaddr *)&client, sizeof(struct sockaddr_in)) < 0)
+                        	perror("sendto");
+		}
 	}
-    }
 
-    close(fd);
-    return 0;
+	close(fd);
+	return 0;
 }
 
-int peripheralSetup (int i2cAddress)
+
+int peripheralSetup (int i2cAddress)			//, struct wiringPiNodeStruct *node)
 {
-  int fd ;
-  if ((fd = wiringPiI2CSetup (i2cAddress)) < 0)
-    return fd ;
+	if(node->fd > 0) {
+		close(node->fd);
+		node->fd = 0;
+	}
+	int fd ;
+	if ((fd = wiringPiI2CSetup (i2cAddress)) < 0)
+		return fd ;
 
-  node = wiringPiNewNode (400, 4) ;		// pinBase = 400
+	node->fd         = fd;
+	node->data0      = 0 ;		// sample rate = 0 
+	node->data1      = 0 ;		// gain = 0
+	if(i2cAddress == MCP3422)		// only mcp3422/24
+		node->analogRead = myAnalogRead ;
+	return 0 ;
+}
 
-  node->fd         = fd;
-  node->data0      = 0 ;		// sample rate = 0 
-  node->data1      = 0 ;		// gain = 0
-  //node->digitalWrite = myDigitalWrite;
-  //node->digitalRead = myDigitalRead;	// write to AVR
-  return 0 ;
+int stop(void)
+{
+	char buf[5];
+	buf[0] = 0x00; 
+	buf[1] = 0x00; buf[2] = 0x00;
+	buf[3] = 0x00; buf[4] = 0x00;
+	write(node->fd, buf, 5);
+	return 0;
+}
+
+PI_THREAD(i2c)
+{
+	while(state != S_exit) {
+		if( state == S_i2c_write) {
+			piLock(LOCK_KEY);
+			write(node->fd, km2buf, received) ;
+			piUnlock(LOCK_KEY);
+			state = S_iddle;
+		}
+/*		if(i2cAddr == MCP3422) {
+			int y = analogRead(400);
+    			int x = analogRead(403);
+			L = (y - x) / 2;
+    			R = (y + x) / 2;
+			printf("\rL=%04i R=%04i     >",L,R);
+			state = S_udp_write;
+		}*/
+	}
 }
 
 int main(void)
 {
-	char buffer[6];
-	int addr;
 	wiringPiSetup();
-	peripheralSetup(0x70);
-	printf("I2C %d\n\n", node->fd);
-	buffer[0] = 0x00;
-	buffer[1] = 0x0F;
-	buffer[2] = 0x01;	// L
-	buffer[3] = 0x0F;
-	buffer[4] = 0x01;
-	write(node->fd, buffer, 5);
-/*
-	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));
-	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));
-	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));
-	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));
-	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));
-	printf("%d\n", wiringPiI2CWrite(node->fd, 0x00));*/
-	//while(1)
-	   // wiringPiI2CWrite(node->fd, 0x00);
-	//printf("Write address (hexadecimal) of the I2C device: \t0x");
-	//scanf("%x", &addr);
-	//mcp3422Setup(400, addr, MCP3422_BITS_12, MCP3422_GAIN_1);
-  //piThreadCreate(udp);
-return 0;
+	memset(&km2buf, 0, 5);
+	node = wiringPiNewNode (400, 4) ;		// pinBase = 400
+	state = S_iddle;
+	piThreadCreate(udp);
+	piThreadCreate(i2c);
+	do{
+		usleep(5000000);	// 5s
+	}
+	while (state != S_exit);
+	return 0;
 }
