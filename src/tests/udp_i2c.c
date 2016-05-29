@@ -32,11 +32,12 @@
 #include "../RaspBot.h"
 
 #define LOCK_KEY 0
-#define DESTPORT 23
+#define DESTPORT 32000
 #define SRCPORT 23
 #define MCP3422 0x68
 
 extern int myAnalogRead (struct wiringPiNodeStruct *node, int chan);		// mcp3422/24
+
 
 /*temporary*/
 volatile enum estate {
@@ -48,10 +49,12 @@ volatile enum estate {
 
 volatile int L = 0;
 volatile int R = 0;
+
 int addrOK = 0;
 char i2cAddr = 0x00;		// General call default
 char km2buf[5];
 int received = 0;
+
 
 struct wiringPiNodeStruct *node ;
 struct sockaddr_in client;
@@ -69,9 +72,8 @@ PI_THREAD(udp)
 	srv.sin_port = htons(SRCPORT);	// unsigned short from host byte order to network byte order
 	bind(fd, (struct sockaddr*)&srv, sizeof(srv));	// bind a name to a socket, bind(sockfd, addr, addrlen);
 	// client settigs
-	//cli.sin_family = AF_INET;
-	//cli.sin_addr.s_addr = htonl(INADDR_ANY);
-	//cli.sin_port = htons(DESTPORT);
+	client.sin_family = AF_INET;
+	client.sin_port = htons(DESTPORT);
 	while (state != S_exit) {
 		fd_set rfds;		// declare struct fd_set
  		FD_ZERO(&rfds);		// clears the set
@@ -90,8 +92,8 @@ PI_THREAD(udp)
 			int by = 0;
 			piLock(LOCK_KEY);
 			by = recvfrom(fd, km2buf, sizeof(km2buf), 0, (struct sockaddr*)&cli, &alen);
+			client.sin_addr.s_addr = cli.sin_addr.s_addr;
 			piUnlock(LOCK_KEY);
-			client = cli;
 	    		if (addrOK) {
 				switch(by)
 				{
@@ -121,6 +123,21 @@ PI_THREAD(udp)
 					break;
 				}
 				//state = S_i2c_write;
+				/*if(i2cAddr == MCP3422) {
+                                        piLock(LOCK_KEY);
+					km2buf[0] = 0;
+					km2buf[1] = (char)(L & 0x00FF);
+					km2buf[2] = (char)((L >> 8) & 0x00FF);
+					km2buf[3] = (char)(R & 0x00FF);
+					km2buf[4] = (char)((R >> 8) & 0x00FF);
+					piUnlock(LOCK_KEY);
+					int attempt = 10;
+					while(attempt--)
+						if(sendto(fd, km2buf,  5, 0, (struct sockaddr *)&client, sizeof(struct sockaddr_in)) < 0)
+       							perror("sendto");
+						else
+							printf("korektne odeslano");
+				}*/
 			}
 			else {
 				state = S_iddle;
@@ -141,17 +158,18 @@ PI_THREAD(udp)
 			}
 		}
 
-		if(state == S_udp_write) {
-
+	if(i2cAddr == MCP3422)		// only mcp3422/24
+	{
+			state = S_iddle;
 			char buf[4];
-			buf[0] = (short)(L & 0x00FF);
-			buf[1] = (short)((L & 0xFF00)  >> 8);
-			buf[2] = (short)(R & 0x00FF);
-			buf[3] = (short)((R & 0xFF00)  >> 8);
+			buf[0] = (char)(L & 0x00FF);
+			buf[1] = (char)((L & 0xFF00)  >> 8);
+			buf[2] = (char)(R & 0x00FF);
+			buf[3] = (char)((R & 0xFF00)  >> 8);
 			int bufsize = 4;
 	                if(sendto(fd, buf, bufsize, 0, (struct sockaddr *)&client, sizeof(struct sockaddr_in)) < 0)
                         	perror("sendto");
-		}
+			}
 	}
 
 	close(fd);
@@ -196,14 +214,14 @@ PI_THREAD(i2c)
 			piUnlock(LOCK_KEY);
 			state = S_iddle;
 		}
-/*		if(i2cAddr == MCP3422) {
+		if(i2cAddr == MCP3422) {
 			int y = analogRead(400);
     			int x = analogRead(403);
 			L = (y - x) / 2;
     			R = (y + x) / 2;
 			printf("\rL=%04i R=%04i     >",L,R);
 			state = S_udp_write;
-		}*/
+		}
 	}
 }
 
