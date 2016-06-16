@@ -24,6 +24,7 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <wiringPi.h>
@@ -35,37 +36,98 @@
 #define DESTPORT 32000
 #define SRCPORT 23
 #define MCP3422 0x68
+#define FILEDESC_LIMIT 500
+
 
 extern int myAnalogRead (struct wiringPiNodeStruct *node, int chan);		// mcp3422/24
-
+int errno;
 
 /*temporary*/
 volatile enum estate {
-	S_i2c_write = 0x08,
-	S_udp_write = 0x10,
-	S_iddle = 0x17,
+	S_iddle = 0x00,
     	S_exit = 0xFF,
 } state = S_iddle;
+int fdnum = 0;
+int L = 0;
+int R = 0;
 
-volatile int L = 0;
-volatile int R = 0;
-
-int addrOK = 0;
-char i2cAddr = 0x00;		// General call default
-char km2buf[5];
-int received = 0;
-
-
-struct wiringPiNodeStruct *node ;
 struct sockaddr_in client;
 
 
 
-
-PI_THREAD(udp)
+int  parseI2CAddr(char i2cAddress, struct wiringPiNodeStruct* node)
 {
+	if(i2cAddress > 0x7F) {		// address range overflow
+		printf("I2C address is out of range");
+		exit(EXIT_FAILURE);
+	}
+	int fd;
+	if((fd = wiringPiI2CSetup (i2cAddress)) < 0) {
+		perror("I2C address is unavailable");
+		return EXIT_FAILURE;
+	}
+	fdnum++;
+	if(fdnum > FILEDESC_LIMIT) {
+		printf("Too many file descriptors in use");
+		exit(EXIT_FAILURE);
+	}
+	node->fd = fd;
+	node->data0      = 0 ;		// sample rate = 0 
+	node->data1      = 0 ;		// gain = 0
+	if(i2cAddress == MCP3422)		// only mcp3422/24
+		node->analogRead = myAnalogRead ;
+
+
+	return EXIT_SUCCESS;
+}
+
+int writeEH(int fd, const void *buf, size_t count)	// write with error handling
+{
+	if(write(fd, buf, count) < 0) {
+		perror("Error during write to I2C") ;
+		exit(EXIT_FAILURE);
+	}
+	return 0;
+}
+
+int checkI2Cdev(char *addrpool, struct wiringPiNodeStruct* node)
+{
+	int i = 0; 	// for loop control variable
+	int  num = 0;	// number of  attached I2C devices
+	printf("Velikosti je/melo by byt %d/%d\n", strlen(addrpool), (0x7F * sizeof(char)));
+	if(strlen(addrpool) < (0x7F * sizeof(char))) {
+		printf("I2C address pool is too small. Desired is 127 address elements.\n");
+		exit(EXIT_FAILURE);
+	}
+	for(i = 1; i <= 0x7F; i++) {
+		if(node->fd) {
+			close(node->fd);
+			node->fd = 0;
+		}
+		if(!parseI2CAddr(i, node))
+			addrpool[num++] = i;
+	}
+	return (num > 0) ? (num-1) : 0;
+}
+
+
+
+int main(void)
+{
+
+
+	wiringPiSetup();
+
+	char i2cpool[127];	// for checkI2Cdev function
+	memset(i2cpool, 1, 127*sizeof(char));
+	struct wiringPiNodeStruct* node; // = (struct wiringPiNodeStruct*) malloc(sizeof(struct wiringPiNodeStruct));
+	node = wiringPiNewNode (400, 4) ;		// pinBase = 400
+	state = S_iddle;
 	struct sockaddr_in srv, cli;
+
+
 	int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	fdnum++;
 	memset(&srv, 0, sizeof(srv));
 	srv.sin_family = AF_INET;
 	srv.sin_addr.s_addr = htonl(INADDR_ANY);	// long from host byte order to network byte order
@@ -74,168 +136,98 @@ PI_THREAD(udp)
 	// client settigs
 	client.sin_family = AF_INET;
 	client.sin_port = htons(DESTPORT);
+	int increment = 0;
 	while (state != S_exit) {
 		fd_set rfds;		// declare struct fd_set
  		FD_ZERO(&rfds);		// clears the set
 		FD_SET(fd,&rfds);	// add file descriptor to set rfds
-		int addok;
-
+		if(fdnum > FILEDESC_LIMIT) {
+			printf("Too many file descriptors in use!");
+			exit(EXIT_FAILURE);
+		}
 		struct timeval tv;
 		tv.tv_sec = 1;
         	tv.tv_usec = 0;
 		if (select(fd+1, &rfds, NULL,NULL, & tv) < 0)
 	    		continue;
 		if (FD_ISSET(fd, &rfds)) { 		// test if file descriptor is part of the set
-
 			char buf[1024];
+			char pombuf[1024];
+			memset(&buf, 0, 1024);
 			socklen_t alen = sizeof(cli);
 			int by = 0;
-			piLock(LOCK_KEY);
-			by = recvfrom(fd, km2buf, sizeof(km2buf), 0, (struct sockaddr*)&cli, &alen);
+			by = recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr*)&cli, &alen);
+			if(by < 2) {
+				printf("Too short message (unknown protocol)");
+				exit(EXIT_FAILURE);
+			}
+
+			int i = 0;					// control variable of for loop
 			client.sin_addr.s_addr = cli.sin_addr.s_addr;
-			piUnlock(LOCK_KEY);
-	    		if (addrOK) {
-				switch(by)
-				{
+			switch(buf[0]) {		// parse function byte (protocol)
+				case 0:
+					printf("Compatibility with previous version\n");
+					if(parseI2CAddr(buf[1], node)) {	// parse address with error check
+						return EXIT_FAILURE;
+					}
+					pombuf[0] = 0;			// get bytes to proper order
+					memcpy(&pombuf[1], &buf[2], 4);
+					writeEH(node->fd, pombuf, 5);
+					break;
 				case 1:
-                                        //piLock(LOCK_KEY);
-                                        addok = peripheralSetup(km2buf[0]);
-                                        //piUnlock(LOCK_KEY);
-                                        i2cAddr = km2buf[0];
-                                        if(addok < 0) {
-                                                addrOK = 0;
-                                                perror("Can't send through i2c");
-                                        }
-                                        else {
-                                                addrOK = 1;
+					printf("Check available devices on I2C bus");
+					checkI2Cdev(i2cpool, node);
+					break;
+				case 2:
+					printf("Write to 1\n");
+					parseI2CAddr(buf[1], node);	// parse address with error check
+					writeEH(node->fd, &buf[2], by-2);
+					break;
+				case 3:
+					printf("Write to multiple\n");
+					printf("Received message: %x, %x, %x, %x, %x, %x\n", buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
+					if((buf[1] < 1) || (buf[1] >= 0x7F)) {
+						printf("There is incorrect number of recipients");
+						exit(EXIT_FAILURE);
+					}
+					parseI2CAddr(buf[2], node);
+					if(by-2-buf[1] <= 0) {
+						printf("There is no message to send");
+						exit(EXIT_FAILURE);
+					}
+					for(i = 0; i < buf[1]; i++) {
+						if((node->fd = wiringPiI2CSetup (buf[2+i])) < 0) {
+							perror("I2C address is unavailable");
+							exit(EXIT_FAILURE);
+						}
+
+						writeEH(node->fd, &buf[2+i], (by-2-buf[1]));
 					}
 					break;
 				case 4:
-					received = 4;
-					state = S_i2c_write;
+					printf("Read from 1\n");
 					break;
 				case 5:
-					L = (short)((km2buf[2] << 8) | km2buf[1]);
-					R = (short)((km2buf[4] << 8) | km2buf[3]);
-					printf("\rL=%04i R=%04i >\n",L,R);
-					received = 5;
-					state = S_i2c_write;
+					printf("Read from multiple\n");
 					break;
-				}
-				//state = S_i2c_write;
-				/*if(i2cAddr == MCP3422) {
-                                        piLock(LOCK_KEY);
-					km2buf[0] = 0;
-					km2buf[1] = (char)(L & 0x00FF);
-					km2buf[2] = (char)((L >> 8) & 0x00FF);
-					km2buf[3] = (char)(R & 0x00FF);
-					km2buf[4] = (char)((R >> 8) & 0x00FF);
-					piUnlock(LOCK_KEY);
-					int attempt = 10;
-					while(attempt--)
-						if(sendto(fd, km2buf,  5, 0, (struct sockaddr *)&client, sizeof(struct sockaddr_in)) < 0)
-       							perror("sendto");
-						else
-							printf("korektne odeslano");
-				}*/
+				case 6:
+					printf("Continuous reading\n");
+					break;
+				case 7:
+					printf("Stop active operation and detroy queue\n");
+					break;
+				case 8:
+					printf("Kill process\n");
+					state = S_exit;
+					break;
 			}
-			else {
-				state = S_iddle;
-				if(by == 1) {		// address was sent
-					int addok;
-					piLock(LOCK_KEY);
-					addok = peripheralSetup(km2buf[0]);
-					piUnlock(LOCK_KEY);
-					i2cAddr = km2buf[0];
-					if(addok < 0) {
-						addrOK = 0;
-						perror("Can't send through i2c");
-					}
-					else {
-						addrOK = 1;
-					}
-				}
+			if(node->fd > 0) {
+				close(node->fd);
+				node->fd = 0;
 			}
 		}
 
-	if(i2cAddr == MCP3422)		// only mcp3422/24
-	{
-			state = S_iddle;
-			char buf[4];
-			buf[0] = (char)(L & 0x00FF);
-			buf[1] = (char)((L & 0xFF00)  >> 8);
-			buf[2] = (char)(R & 0x00FF);
-			buf[3] = (char)((R & 0xFF00)  >> 8);
-			int bufsize = 4;
-	                if(sendto(fd, buf, bufsize, 0, (struct sockaddr *)&client, sizeof(struct sockaddr_in)) < 0)
-                        	perror("sendto");
-			}
 	}
-
-	close(fd);
-	return 0;
-}
-
-
-int peripheralSetup (int i2cAddress)			//, struct wiringPiNodeStruct *node)
-{
-	if(node->fd > 0) {
-		close(node->fd);
-		node->fd = 0;
-	}
-	int fd ;
-	if ((fd = wiringPiI2CSetup (i2cAddress)) < 0)
-		return fd ;
-
-	node->fd         = fd;
-	node->data0      = 0 ;		// sample rate = 0 
-	node->data1      = 0 ;		// gain = 0
-	if(i2cAddress == MCP3422)		// only mcp3422/24
-		node->analogRead = myAnalogRead ;
-	return 0 ;
-}
-
-int stop(void)
-{
-	char buf[5];
-	buf[0] = 0x00; 
-	buf[1] = 0x00; buf[2] = 0x00;
-	buf[3] = 0x00; buf[4] = 0x00;
-	write(node->fd, buf, 5);
-	return 0;
-}
-
-PI_THREAD(i2c)
-{
-	while(state != S_exit) {
-		if( state == S_i2c_write) {
-			piLock(LOCK_KEY);
-			write(node->fd, km2buf, received) ;
-			piUnlock(LOCK_KEY);
-			state = S_iddle;
-		}
-		if(i2cAddr == MCP3422) {
-			int y = analogRead(400);
-    			int x = analogRead(403);
-			L = (y - x) / 2;
-    			R = (y + x) / 2;
-			printf("\rL=%04i R=%04i     >",L,R);
-			state = S_udp_write;
-		}
-	}
-}
-
-int main(void)
-{
-	wiringPiSetup();
-	memset(&km2buf, 0, 5);
-	node = wiringPiNewNode (400, 4) ;		// pinBase = 400
-	state = S_iddle;
-	piThreadCreate(udp);
-	piThreadCreate(i2c);
-	do{
-		usleep(5000000);	// 5s
-	}
-	while (state != S_exit);
+	printf("End of program");
 	return 0;
 }

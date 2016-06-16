@@ -12,9 +12,6 @@
 #define DESTPORT 5678    // the port  for mndp
 //#define SRCPORT 5678
 
-char * iface = NULL;
-
-
 void print_usage()
 {
     printf("\n\nUsage:\n\t-a\tset number of broadcast attempts per defined period\n"
@@ -42,7 +39,7 @@ char * addmsg(char *ptr, int id, int len, const char* msg)
     return ptr;
 }
 
-int scanIface(char * path)
+int scanIface(char * path, char *iface)
 {
 	DIR *dp;
   	struct dirent *ep;
@@ -65,9 +62,9 @@ int scanIface(char * path)
 		return 1;
 }
 
-int getmac(char *mac_addr)
+int getmac(char *mac_addr, char *iface)
 {
-	if (scanIface("/sys/class/net"))
+	if (scanIface("/sys/class/net", iface))
 		return 1;
 	char* path = (char*) malloc(24 + strlen(iface));
 	memset(path, '\0', 24 + strlen(iface));
@@ -87,6 +84,7 @@ int getmac(char *mac_addr)
 	}
 	else
 		perror("MAC file not found\n");
+		return 1;
 }
 
 char * addmsgT(char *ptr, int id, const char* msg)
@@ -96,6 +94,7 @@ char * addmsgT(char *ptr, int id, const char* msg)
 
 int main(int argc, char *argv[])
 {
+	char * iface = NULL;
 	int attempts = 10, mult = 3, opt;
 	int charnum = 0;
 	char*  identity = NULL;
@@ -109,8 +108,12 @@ int main(int argc, char *argv[])
 		case 'a':	// attempts
 			attempts = atoi(optarg);
 			break;
-		case 't':	// multiplier of broadcasting
+		case 't':	// multiplier of 10 s time
 			mult = atoi(optarg);
+			if (mult <= 0) {
+				mult = 3;
+				continue;
+			}
 			break;
 		case 'f':
 			charnum = strlen(optarg) + 1;
@@ -210,7 +213,7 @@ int main(int argc, char *argv[])
 	char *ptr = &buf[4];
 	char mac[6];
 	memset(mac, '\0', 6);
-	getmac(mac);		// get MAC address of defined global iface
+	getmac(mac, iface);		// get MAC address of defined global iface
 	// for debug only
 	//printf("MAC addr %x:%x:%x:%x:%x:%x\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
@@ -226,9 +229,9 @@ int main(int argc, char *argv[])
 
 			if(sendto(bcast_fd, buf, ptr - buf, 0, (struct sockaddr *)&addr, sizeof(struct sockaddr_in)) < 0)
        				perror("sendto");
-			usleep(1000000);	// wait 1s
+			sleep(1);	// wait 1s
 		}
-		usleep(mult * 10000000);		// wait 10s multiple
+		sleep(mult * 10);		// wait 10s multiple
 	}
 
 	return 0;
