@@ -51,6 +51,7 @@ SRC  =	blink.c
 SRC +=  motor.c
 SRC +=  motoff.c
 SRC +=  joy.c
+SRC +=  udp_i2c.c
 
 OBJ	=	$(SRC:.c=.o)
 BINS	=	$(SRC:.c=)
@@ -71,6 +72,10 @@ motor: motor.o
 	$Q $(CC) -o $@ $< $(LDFLAGS) $(LDLIBS)
 
 joy: joy.o
+	$Q echo [LNK] $@
+	$Q $(CC) -o $@ $< $(LDFLAGS) $(LDLIBS)
+
+udp_i2c: udp_i2c.o
 	$Q echo [LNK] $@
 	$Q $(CC) -o $@ $< $(LDFLAGS) $(LDLIBS)
 
